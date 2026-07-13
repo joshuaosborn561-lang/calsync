@@ -32,7 +32,8 @@ def get_calendar_service(
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(credentials_path), SCOPES
             )
-            creds = flow.run_local_server(port=0)
+            # Fixed port so a Web OAuth client can use http://localhost:8080/ redirect.
+            creds = flow.run_local_server(port=8080, open_browser=True)
 
         token_path.write_text(creds.to_json(), encoding="utf-8")
 
