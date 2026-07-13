@@ -18,8 +18,8 @@ var SYNC_PAST_DAYS = 7;
 var SYNC_FUTURE_DAYS = 365;
 
 var PAUSE_MS = 2000;
-var RATE_LIMIT_WAIT_MS = 90000;
-var MAX_EXEC_MS = 5.5 * 60 * 1000;
+var RATE_LIMIT_WAIT_MS = 60000;
+var MAX_EXEC_MS = 4 * 60 * 1000;
 var CONTINUE_DELAY_MS = 2 * 60 * 1000;
 var MAINTENANCE_INTERVAL_MINUTES = 5;
 
@@ -27,48 +27,59 @@ var MIRROR_SOURCE_KEY = "mirrorSourceId";
 var MIRROR_SOURCE_CAL_KEY = "mirrorSourceCalendarId";
 
 /**
- * RUN THIS ONCE. It copies everything, auto-pauses on rate limits,
- * and reschedules itself until done. Then enables ongoing 15-min sync.
+ * RUN THIS ONCE. Copies everything, then auto-continues in the background.
+ * If it times out, that's OK — it schedules itself to keep going.
  */
 function syncAll() {
   checkCalendarApi_();
   var startTime = Date.now();
-  var totals = { created: 0, updated: 0, deleted: 0, skipped: 0 };
+  var deadline = startTime + MAX_EXEC_MS;
+  var totals = loadTotals_();
+  var finished = false;
 
-  while (Date.now() - startTime < MAX_EXEC_MS) {
-    var pass = runSyncPass_();
+  try {
+    while (Date.now() < deadline) {
+      var pass = runSyncPass_(deadline);
 
-    totals.created += pass.created;
-    totals.updated += pass.updated;
-    totals.deleted += pass.deleted;
-    totals.skipped += pass.skipped;
+      totals.created += pass.created;
+      totals.updated += pass.updated;
+      totals.deleted += pass.deleted;
+      totals.skipped += pass.skipped;
 
-    saveProgress_(totals, pass.done);
+      saveProgress_(totals, pass.done);
 
-    if (pass.done) {
-      clearContinueTriggers_();
-      enableMaintenanceSchedule_();
-      var doneMsg = "ALL DONE! Created: " + totals.created + ", Updated: " + totals.updated +
-        ", Deleted: " + totals.deleted + ", Skipped: " + totals.skipped +
-        "\nOngoing sync enabled (every " + MAINTENANCE_INTERVAL_MINUTES + " min).";
-      Logger.log(doneMsg);
-      return doneMsg;
+      if (pass.done) {
+        finished = true;
+        clearContinueTriggers_();
+        enableMaintenanceSchedule_();
+        var doneMsg = "ALL DONE! Created: " + totals.created + ", Updated: " + totals.updated +
+          ", Deleted: " + totals.deleted + ", Skipped: " + totals.skipped +
+          "\nAuto-sync ON (every " + MAINTENANCE_INTERVAL_MINUTES + " min).";
+        Logger.log(doneMsg);
+        return doneMsg;
+      }
+
+      if (pass.rateLimited) {
+        if (Date.now() + RATE_LIMIT_WAIT_MS < deadline) {
+          Logger.log("Rate limit — waiting 60 seconds...");
+          Utilities.sleep(RATE_LIMIT_WAIT_MS);
+          continue;
+        }
+        break;
+      }
+
+      if (pass.wrote === 0) break;
     }
-
-    if (pass.rateLimited) {
-      Logger.log("Rate limit — waiting 90 seconds, then continuing...");
-      Utilities.sleep(RATE_LIMIT_WAIT_MS);
-      continue;
+  } finally {
+    if (!finished) {
+      scheduleContinue_();
+      saveProgress_(totals, false);
+      Logger.log(
+        "Paused (Google time limit). Created so far: " + totals.created +
+        ". Auto-continues in ~2 min — or run finishSetup when ready."
+      );
     }
-
-    if (pass.wrote === 0) break;
   }
-
-  scheduleContinue_();
-  var msg = "Still copying in the background. Created so far: " + totals.created +
-    ". Will auto-continue in ~2 min. You can close this tab.";
-  Logger.log(msg);
-  return msg;
 }
 
 /** Auto-triggered — you never need to run this yourself */
@@ -119,12 +130,32 @@ function syncNow() {
 
 function createSchedule() {
   enableMaintenanceSchedule_();
-  Logger.log("Ongoing sync enabled — every 15 minutes.");
+  Logger.log("Auto-sync ON — every " + MAINTENANCE_INTERVAL_MINUTES + " minutes.");
+}
+
+/**
+ * Run this if syncAll timed out but your calendar looks good.
+ * Finishes any remaining copies and turns on auto-sync.
+ */
+function finishSetup() {
+  checkCalendarApi_();
+  var deadline = Date.now() + MAX_EXEC_MS;
+  var pass = runSyncPass_(deadline);
+  if (pass.done) {
+    clearContinueTriggers_();
+    enableMaintenanceSchedule_();
+    saveProgress_(loadTotals_(), true);
+    Logger.log("Setup complete! Auto-sync every " + MAINTENANCE_INTERVAL_MINUTES + " min.");
+  } else {
+    Logger.log(pass.pending + " items still pending. Run syncAll again or wait for auto-continue.");
+    scheduleContinue_();
+  }
 }
 
 // ─── core sync ───────────────────────────────────────────────────────────────
 
-function runSyncPass_() {
+function runSyncPass_(deadlineMs) {
+  var deadline = deadlineMs || (Date.now() + 3600000);
   var sourceCalId = findCalendarId_(SOURCE_CALENDAR_NAME, false);
   var destCalId = findCalendarId_(DESTINATION_CALENDAR_NAME, true);
 
@@ -167,7 +198,7 @@ function runSyncPass_() {
           updateMirror_(destCalId, existing.id, ev, title, sourceId, sourceCalId);
           updated++;
           wrote++;
-          Utilities.sleep(PAUSE_MS);
+          if (Date.now() + PAUSE_MS < deadline) Utilities.sleep(PAUSE_MS);
         } else {
           skipped++;
         }
@@ -188,12 +219,13 @@ function runSyncPass_() {
 
   if (!rateLimited) {
     for (var sourceIdKey in mirrorsBySourceId) {
+      if (Date.now() > deadline - 15000) break;
       if (!seenSourceIds[sourceIdKey]) {
         try {
           Calendar.Events.remove(destCalId, mirrorsBySourceId[sourceIdKey].id);
           deleted++;
           wrote++;
-          Utilities.sleep(PAUSE_MS);
+          if (Date.now() + PAUSE_MS < deadline) Utilities.sleep(PAUSE_MS);
         } catch (e) {
           if (isRateLimit_(e)) {
             rateLimited = true;
@@ -277,6 +309,18 @@ function saveProgress_(totals, done) {
       at: new Date().toISOString()
     })
   );
+}
+
+function loadTotals_() {
+  var raw = PropertiesService.getScriptProperties().getProperty("syncProgress");
+  if (!raw) return { created: 0, updated: 0, deleted: 0, skipped: 0 };
+  var p = JSON.parse(raw);
+  return {
+    created: p.created || 0,
+    updated: p.updated || 0,
+    deleted: p.deleted || 0,
+    skipped: p.skipped || 0
+  };
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
