@@ -40,24 +40,21 @@ Click **New project**.
 
 ---
 
-## Step 4 — Test the sync
+## Step 4 — Run once and walk away
 
-1. Select **`syncNow`** in the dropdown
+1. Select **`syncAll`** in the dropdown
 2. Click **Run** ▶
-3. Check the log — should say something like `Created: 12, Updated: 0...`
-4. Open Google Calendar — you should see **`[Work]`** events on your main calendar
+3. That's it — close the tab if you want
 
----
+The script will:
+- Copy events in batches with pauses
+- Wait and retry if Google rate-limits you
+- **Automatically reschedule itself** every 2 minutes until everything is copied
+- Turn on ongoing 15-minute sync when finished
 
-## Step 5 — Auto-sync every 15 minutes
+To check progress later: run **`checkProgress`** and look at the log.
 
-1. Select **`createSchedule`**
-2. Click **Run** ▶ once
-3. Done — it keeps syncing in the background
-
----
-
-## Step 6 — Calendly
+## Step 5 — Calendly
 
 In Calendly, connect your **main Google Calendar** (the same one you used as destination).  
 The `[Work]` blocks will show as busy so Calendly stops double-booking you.
