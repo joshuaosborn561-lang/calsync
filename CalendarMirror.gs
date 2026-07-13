@@ -1,24 +1,17 @@
 /**
- * Calendar Mirror — paste this entire file at https://script.google.com
+ * Calendar Mirror — https://script.google.com
  *
- * WHAT IT DOES:
- * Copies events from your subscribed work calendar onto a calendar you own,
- * so Calendly can see you're busy.
- *
- * SETUP (5 minutes):
- * 1. Paste this code into a new Apps Script project
- * 2. Edit SOURCE_CALENDAR_NAME below (the name you see in Google Calendar)
- * 3. Run "setup" from the dropdown → click Allow when Google asks
- * 4. Run "listMyCalendars" if you're not sure of the calendar name
- * 5. Run "syncNow" once to test
- * 6. Run "createSchedule" to auto-sync every 15 minutes
+ * ONE-TIME SETUP:
+ * 1. Paste this code, set SOURCE_CALENDAR_NAME below, Save
+ * 2. Left sidebar → click "+" next to "Services"
+ * 3. Find "Google Calendar API" → Add
+ * 4. Run listMyCalendars → Allow access
+ * 5. Run syncNow (may take several runs if you have lots of meetings)
+ * 6. Run createSchedule for automatic syncing every 15 minutes
  */
 
 // ─── EDIT THIS ───────────────────────────────────────────────────────────────
-// The exact name of your subscribed WORK calendar (as shown in Google Calendar sidebar)
 var SOURCE_CALENDAR_NAME = "Work";
-
-// Where to put copies. Use "primary" for your main calendar, or a name like "Work (mirrored)"
 var DESTINATION_CALENDAR_NAME = "primary";
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -26,100 +19,137 @@ var MIRROR_PREFIX = "[Work] ";
 var SYNC_PAST_DAYS = 7;
 var SYNC_FUTURE_DAYS = 365;
 
+// Google rate-limits bulk creates — stay under the limit
+var MAX_WRITES_PER_RUN = 8;
+var PAUSE_MS = 2500;
+
+var MIRROR_SOURCE_KEY = "mirrorSourceId";
+var MIRROR_SOURCE_CAL_KEY = "mirrorSourceCalendarId";
+
 function setup() {
+  checkCalendarApi_();
   listMyCalendars();
-  Logger.log("If you see your work calendar above, make sure SOURCE_CALENDAR_NAME matches exactly.");
-  Logger.log("Then run syncNow to test, then createSchedule for automatic syncing.");
+  Logger.log("Next: run syncNow. If you have many meetings, run it several times (or wait for the schedule).");
 }
 
 function listMyCalendars() {
-  var calendars = CalendarApp.getAllCalendars();
+  checkCalendarApi_();
+  var list = Calendar.CalendarList.list();
+  var items = list.items || [];
   Logger.log("=== YOUR CALENDARS ===");
-  for (var i = 0; i < calendars.length; i++) {
-    var cal = calendars[i];
-    var id = cal.getId();
-    var name = cal.getName();
+  for (var i = 0; i < items.length; i++) {
+    var cal = items[i];
     var hint = "";
-    if (name === SOURCE_CALENDAR_NAME) hint = "  ← SOURCE (configured)";
-    if (name === DESTINATION_CALENDAR_NAME || (DESTINATION_CALENDAR_NAME === "primary" && cal.isMyPrimaryCalendar())) {
-      hint = "  ← DESTINATION (configured)";
-    }
-    Logger.log(name + hint);
-    Logger.log("  ID: " + id);
+    if (cal.summary === SOURCE_CALENDAR_NAME) hint = "  ← SOURCE";
+    if (DESTINATION_CALENDAR_NAME === "primary" && cal.primary) hint = "  ← DESTINATION";
+    if (cal.summary === DESTINATION_CALENDAR_NAME) hint = "  ← DESTINATION";
+    Logger.log(cal.summary + hint);
+    Logger.log("  ID: " + cal.id);
+    Logger.log("  Access: " + cal.accessRole);
   }
   Logger.log("======================");
 }
 
 function syncNow() {
-  var source = findCalendar_(SOURCE_CALENDAR_NAME, false);
-  var dest = findCalendar_(DESTINATION_CALENDAR_NAME, true);
+  checkCalendarApi_();
 
-  if (!source) {
-    throw new Error(
-      'Cannot find source calendar named "' + SOURCE_CALENDAR_NAME + '". ' +
-      "Run listMyCalendars and copy the exact name."
-    );
+  var sourceCalId = findCalendarId_(SOURCE_CALENDAR_NAME, false);
+  var destCalId = findCalendarId_(DESTINATION_CALENDAR_NAME, true);
+
+  if (!sourceCalId) {
+    throw new Error('Cannot find "' + SOURCE_CALENDAR_NAME + '". Run listMyCalendars for exact names.');
   }
-  if (!dest) {
-    throw new Error(
-      'Cannot find destination calendar "' + DESTINATION_CALENDAR_NAME + '". ' +
-      'Use "primary" or the exact name of a calendar you own.'
-    );
+  if (!destCalId) {
+    throw new Error('Cannot find destination "' + DESTINATION_CALENDAR_NAME + '".');
   }
 
   var now = new Date();
-  var start = new Date(now.getTime() - SYNC_PAST_DAYS * 24 * 60 * 60 * 1000);
-  var end = new Date(now.getTime() + SYNC_FUTURE_DAYS * 24 * 60 * 60 * 1000);
+  var timeMin = new Date(now.getTime() - SYNC_PAST_DAYS * 86400000).toISOString();
+  var timeMax = new Date(now.getTime() + SYNC_FUTURE_DAYS * 86400000).toISOString();
 
-  var sourceEvents = source.getEvents(start, end);
-  var destEvents = dest.getEvents(start, end);
+  var sourceEvents = listSourceEvents_(sourceCalId, timeMin, timeMax);
+  var mirrors = listMirrorEvents_(destCalId, sourceCalId, timeMin, timeMax);
 
   var mirrorsBySourceId = {};
-  for (var d = 0; d < destEvents.length; d++) {
-    var mirror = destEvents[d];
-    var tag = mirror.getTag("mirrorSourceId");
-    if (tag) mirrorsBySourceId[tag] = mirror;
+  for (var m = 0; m < mirrors.length; m++) {
+    var props = (mirrors[m].extendedProperties || {}).private || {};
+    if (props[MIRROR_SOURCE_KEY]) mirrorsBySourceId[props[MIRROR_SOURCE_KEY]] = mirrors[m];
   }
 
-  var created = 0, updated = 0, deleted = 0, skipped = 0;
+  var created = 0, updated = 0, deleted = 0, skipped = 0, writes = 0;
   var seenSourceIds = {};
+  var rateLimited = false;
 
   for (var s = 0; s < sourceEvents.length; s++) {
-    var ev = sourceEvents[s];
-    var sourceId = ev.getId();
-    seenSourceIds[sourceId] = true;
+    if (writes >= MAX_WRITES_PER_RUN) break;
 
-    var title = MIRROR_PREFIX + ev.getTitle();
+    var ev = sourceEvents[s];
+    if (!shouldMirror_(ev)) continue;
+
+    var sourceId = ev.id;
+    seenSourceIds[sourceId] = true;
+    var title = MIRROR_PREFIX + (ev.summary || "(No title)");
     var existing = mirrorsBySourceId[sourceId];
 
-    if (existing) {
-      if (eventMatches_(ev, existing, title)) {
-        skipped++;
+    try {
+      if (existing) {
+        if (needsUpdate_(ev, existing, title)) {
+          updateMirror_(destCalId, existing.id, ev, title, sourceId, sourceCalId);
+          updated++;
+          writes++;
+          pause_();
+        } else {
+          skipped++;
+        }
       } else {
-        updateMirror_(existing, ev, title);
-        updated++;
+        createMirror_(destCalId, ev, title, sourceId, sourceCalId);
+        created++;
+        writes++;
+        pause_();
       }
-    } else {
-      createMirror_(dest, ev, title, sourceId, source.getId());
-      created++;
+    } catch (e) {
+      if (isRateLimit_(e)) {
+        rateLimited = true;
+        Logger.log("Rate limit hit — stopping early. Wait 10 minutes and run syncNow again.");
+        break;
+      }
+      throw e;
     }
   }
 
   for (var sourceIdKey in mirrorsBySourceId) {
+    if (writes >= MAX_WRITES_PER_RUN) break;
     if (!seenSourceIds[sourceIdKey]) {
-      mirrorsBySourceId[sourceIdKey].deleteEvent();
-      deleted++;
+      try {
+        Calendar.Events.remove(destCalId, mirrorsBySourceId[sourceIdKey].id);
+        deleted++;
+        writes++;
+        pause_();
+      } catch (e) {
+        if (isRateLimit_(e)) {
+          rateLimited = true;
+          break;
+        }
+        throw e;
+      }
     }
   }
 
-  var msg = "Sync done! Created: " + created + ", Updated: " + updated +
+  var remaining = sourceEvents.length - skipped - created - updated;
+  var msg = "Created: " + created + ", Updated: " + updated +
     ", Deleted: " + deleted + ", Skipped: " + skipped;
+
+  if (writes >= MAX_WRITES_PER_RUN || rateLimited) {
+    msg += "\n\nNot finished yet — run syncNow again in 10 minutes (or let the schedule handle it).";
+  } else {
+    msg += "\n\nAll caught up!";
+  }
+
   Logger.log(msg);
   return msg;
 }
 
 function createSchedule() {
-  // Remove old triggers first
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === "syncNow") {
@@ -127,44 +157,119 @@ function createSchedule() {
     }
   }
   ScriptApp.newTrigger("syncNow").timeBased().everyMinutes(15).create();
-  Logger.log("Automatic sync enabled — runs every 15 minutes.");
+  Logger.log("Auto-sync on — runs every 15 minutes until everything is copied.");
 }
 
-function findCalendar_(nameOrPrimary, mustBeWritable) {
-  var calendars = CalendarApp.getAllCalendars();
-  for (var i = 0; i < calendars.length; i++) {
-    var cal = calendars[i];
-    if (nameOrPrimary === "primary" && cal.isMyPrimaryCalendar()) {
-      return cal;
-    }
-    if (cal.getName() === nameOrPrimary) {
-      return cal;
-    }
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+function checkCalendarApi_() {
+  if (typeof Calendar === "undefined" || !Calendar.Events) {
+    throw new Error(
+      "Google Calendar API not enabled.\n" +
+      "Left sidebar → click + next to Services → Google Calendar API → Add → Save → try again."
+    );
+  }
+}
+
+function findCalendarId_(nameOrPrimary, mustBeWritable) {
+  var list = Calendar.CalendarList.list();
+  var items = list.items || [];
+  for (var i = 0; i < items.length; i++) {
+    var cal = items[i];
+    if (nameOrPrimary === "primary" && cal.primary) return cal.id;
+    if (cal.summary === nameOrPrimary) return cal.id;
   }
   return null;
 }
 
-function createMirror_(destCal, sourceEv, title, sourceId, sourceCalId) {
-  var options = {
+function listSourceEvents_(calendarId, timeMin, timeMax) {
+  var events = [];
+  var pageToken;
+  do {
+    var resp = Calendar.Events.list(calendarId, {
+      timeMin: timeMin,
+      timeMax: timeMax,
+      singleEvents: false,
+      showDeleted: false,
+      maxResults: 2500,
+      pageToken: pageToken
+    });
+    if (resp.items) events = events.concat(resp.items);
+    pageToken = resp.nextPageToken;
+  } while (pageToken);
+  return events;
+}
+
+function listMirrorEvents_(destCalId, sourceCalId, timeMin, timeMax) {
+  var events = [];
+  var pageToken;
+  do {
+    var resp = Calendar.Events.list(destCalId, {
+      timeMin: timeMin,
+      timeMax: timeMax,
+      singleEvents: false,
+      showDeleted: false,
+      maxResults: 2500,
+      pageToken: pageToken,
+      privateExtendedProperty: MIRROR_SOURCE_CAL_KEY + "=" + sourceCalId
+    });
+    if (resp.items) events = events.concat(resp.items);
+    pageToken = resp.nextPageToken;
+  } while (pageToken);
+  return events;
+}
+
+function shouldMirror_(ev) {
+  if (ev.status === "cancelled") return false;
+  // Skip expanded instances; mirror the recurring master instead
+  if (ev.recurringEventId && !ev.originalStartTime) return false;
+  return true;
+}
+
+function needsUpdate_(source, mirror, title) {
+  var props = (mirror.extendedProperties || {}).private || {};
+  if (props.mirrorSourceUpdated === source.updated) return false;
+  return mirror.summary !== title;
+}
+
+function buildMirrorBody_(source, title, sourceId, sourceCalId) {
+  var body = {
+    summary: title,
+    start: source.start,
+    end: source.end,
+    transparency: "opaque",
+    guestsCanModify: false,
+    guestsCanInviteOthers: false,
     description: "Mirrored from subscribed calendar.\nSource: " + sourceId,
-    location: sourceEv.getLocation() || "",
+    extendedProperties: {
+      private: {}
+    }
   };
-  var newEv = destCal.createEvent(title, sourceEv.getStartTime(), sourceEv.getEndTime(), options);
-  newEv.setTag("mirrorSourceId", sourceId);
-  newEv.setTag("mirrorSourceCalendarId", sourceCalId);
-  newEv.setTransparency(CalendarApp.EventTransparency.OPAQUE);
+  body.extendedProperties.private[MIRROR_SOURCE_KEY] = sourceId;
+  body.extendedProperties.private[MIRROR_SOURCE_CAL_KEY] = sourceCalId;
+  body.extendedProperties.private.mirrorSourceUpdated = source.updated || "";
+
+  if (source.location) body.location = source.location;
+  if (source.recurrence) body.recurrence = source.recurrence;
+
+  return body;
 }
 
-function updateMirror_(mirror, sourceEv, title) {
-  mirror.setTitle(title);
-  mirror.setTime(sourceEv.getStartTime(), sourceEv.getEndTime());
-  mirror.setLocation(sourceEv.getLocation() || "");
-  mirror.setDescription("Mirrored from subscribed calendar.\nSource: " + sourceEv.getId());
-  mirror.setTransparency(CalendarApp.EventTransparency.OPAQUE);
+function createMirror_(destCalId, source, title, sourceId, sourceCalId) {
+  var body = buildMirrorBody_(source, title, sourceId, sourceCalId);
+  Calendar.Events.insert(body, destCalId, { sendUpdates: "none" });
 }
 
-function eventMatches_(sourceEv, mirror, title) {
-  return mirror.getTitle() === title &&
-    mirror.getStartTime().getTime() === sourceEv.getStartTime().getTime() &&
-    mirror.getEndTime().getTime() === sourceEv.getEndTime().getTime();
+function updateMirror_(destCalId, mirrorId, source, title, sourceId, sourceCalId) {
+  var body = buildMirrorBody_(source, title, sourceId, sourceCalId);
+  Calendar.Events.update(body, destCalId, mirrorId, { sendUpdates: "none" });
+}
+
+function pause_() {
+  Utilities.sleep(PAUSE_MS);
+}
+
+function isRateLimit_(e) {
+  var msg = String(e.message || e);
+  return msg.indexOf("too many") !== -1 || msg.indexOf("Rate Limit") !== -1;
 }
