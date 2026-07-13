@@ -21,6 +21,7 @@ var PAUSE_MS = 2000;
 var RATE_LIMIT_WAIT_MS = 90000;
 var MAX_EXEC_MS = 5.5 * 60 * 1000;
 var CONTINUE_DELAY_MS = 2 * 60 * 1000;
+var MAINTENANCE_INTERVAL_MINUTES = 5;
 
 var MIRROR_SOURCE_KEY = "mirrorSourceId";
 var MIRROR_SOURCE_CAL_KEY = "mirrorSourceCalendarId";
@@ -49,7 +50,7 @@ function syncAll() {
       enableMaintenanceSchedule_();
       var doneMsg = "ALL DONE! Created: " + totals.created + ", Updated: " + totals.updated +
         ", Deleted: " + totals.deleted + ", Skipped: " + totals.skipped +
-        "\nOngoing sync enabled (every 15 min).";
+        "\nOngoing sync enabled (every " + MAINTENANCE_INTERVAL_MINUTES + " min).";
       Logger.log(doneMsg);
       return doneMsg;
     }
@@ -261,7 +262,7 @@ function enableMaintenanceSchedule_() {
       ScriptApp.deleteTrigger(triggers[i]);
     }
   }
-  ScriptApp.newTrigger("syncNow").timeBased().everyMinutes(15).create();
+  ScriptApp.newTrigger("syncNow").timeBased().everyMinutes(MAINTENANCE_INTERVAL_MINUTES).create();
 }
 
 function saveProgress_(totals, done) {
@@ -344,8 +345,17 @@ function shouldMirror_(ev) {
 
 function needsUpdate_(source, mirror, title) {
   var props = (mirror.extendedProperties || {}).private || {};
-  if (props.mirrorSourceUpdated === source.updated) return false;
-  return mirror.summary !== title;
+  if (props.mirrorSourceUpdated !== (source.updated || "")) return true;
+  if (mirror.summary !== title) return true;
+  if (!dateTimeEqual_(mirror.start, source.start)) return true;
+  if (!dateTimeEqual_(mirror.end, source.end)) return true;
+  return false;
+}
+
+function dateTimeEqual_(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return (a.dateTime || a.date) === (b.dateTime || b.date);
 }
 
 function buildMirrorBody_(source, title, sourceId, sourceCalId) {
