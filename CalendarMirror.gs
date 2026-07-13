@@ -184,6 +184,8 @@ function runSyncPass_(deadlineMs) {
   var seenSourceIds = {};
 
   for (var s = 0; s < sourceEvents.length; s++) {
+    if (Date.now() > deadline - 15000) break;
+
     var ev = sourceEvents[s];
     if (!shouldMirror_(ev)) continue;
 
@@ -206,7 +208,7 @@ function runSyncPass_(deadlineMs) {
         createMirror_(destCalId, ev, title, sourceId, sourceCalId);
         created++;
         wrote++;
-        Utilities.sleep(PAUSE_MS);
+        if (Date.now() + PAUSE_MS < deadline) Utilities.sleep(PAUSE_MS);
       }
     } catch (e) {
       if (isRateLimit_(e)) {
