@@ -62,11 +62,9 @@ def _content_hash(event: dict[str, Any], config: MirrorConfig) -> str:
         "summary": event.get("summary", ""),
         "start": event.get("start"),
         "end": event.get("end"),
-        "recurrence": event.get("recurrence"),
         "location": event.get("location") if config.copy_location else None,
         "description": event.get("description") if config.copy_description else None,
         "status": event.get("status"),
-        "transparency": event.get("transparency"),
     }
     encoded = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
