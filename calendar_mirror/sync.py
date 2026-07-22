@@ -111,9 +111,7 @@ def _build_mirror_body(
         original = source.get("description") or ""
         body["description"] = f"{note}\n\n{original}".strip() if original else note
 
-    if source.get("recurrence"):
-        body["recurrence"] = source["recurrence"]
-
+    # Never copy recurrence — mirror expanded instances so moves delete cleanly.
     return body
 
 
@@ -165,7 +163,7 @@ def _list_all_mirror_events(
         config.destination_calendar_id,
         time_min,
         time_max,
-        single_events=False,
+        single_events=True,
         private_extended_property=prop_filter,
     )
 
@@ -175,10 +173,8 @@ def _should_mirror_source_event(event: dict[str, Any], config: MirrorConfig) -> 
         return False
     if config.skip_all_day and _is_all_day(event):
         return False
-    # Skip individual instances when the recurring master is mirrored separately.
-    # Exception instances (modified occurrences) have recurringEventId set but
-    # also carry their own recurrence overrides — we mirror those as singles.
-    if event.get("recurringEventId") and not event.get("originalStartTime"):
+    start = event.get("start") or {}
+    if "dateTime" not in start and "date" not in start:
         return False
     return True
 
@@ -191,12 +187,8 @@ def _mirror_needs_update(
     props = _event_private_props(mirror)
     source_hash = _content_hash(source, config)
     stored_hash = props.get(MIRROR_CONTENT_HASH_KEY)
-    stored_updated = props.get(MIRROR_SOURCE_UPDATED_KEY)
-    source_updated = source.get("updated", "")
 
     if stored_hash and stored_hash == source_hash:
-        return False
-    if stored_updated and stored_updated == source_updated:
         return False
     return True
 
@@ -312,7 +304,7 @@ def _sync_one_source(
             source_calendar_id,
             time_min,
             time_max,
-            single_events=False,
+            single_events=True,
         )
     except HttpError as exc:
         if exc.resp.status == 404:
@@ -344,33 +336,13 @@ def _sync_one_source(
         if source_id:
             mirror_by_source_id[source_id] = mirror
 
-    for source_id, source in source_by_id.items():
-        mirror = mirror_by_source_id.get(source_id)
-        try:
-            if mirror is None:
-                _create_mirror(service, config, source_calendar_id, source)
-                stats.created += 1
-                logger.info("Created mirror for: %s", source.get("summary", source_id))
-            elif _mirror_needs_update(source, mirror, config):
-                _update_mirror(service, config, source_calendar_id, source, mirror)
-                stats.updated += 1
-                logger.info("Updated mirror for: %s", source.get("summary", source_id))
-            else:
-                stats.skipped += 1
-        except HttpError as exc:
-            stats.errors += 1
-            logger.error(
-                "Failed to sync event %s (%s): %s",
-                source_id,
-                source.get("summary"),
-                exc,
-            )
-
-    for source_id, mirror in mirror_by_source_id.items():
+    # Delete stale mirrors first so moved meetings don't leave old busy blocks.
+    for source_id, mirror in list(mirror_by_source_id.items()):
         if source_id not in source_by_id:
             try:
                 _delete_mirror(service, config, mirror)
                 stats.deleted += 1
+                del mirror_by_source_id[source_id]
                 logger.info(
                     "Deleted stale mirror for source event %s: %s",
                     source_id,
@@ -383,6 +355,40 @@ def _sync_one_source(
                     mirror.get("id"),
                     exc,
                 )
+
+    for source_id, source in source_by_id.items():
+        mirror = mirror_by_source_id.get(source_id)
+        try:
+            if mirror is None:
+                _create_mirror(service, config, source_calendar_id, source)
+                stats.created += 1
+                logger.info("Created mirror for: %s", source.get("summary", source_id))
+            elif _mirror_needs_update(source, mirror, config):
+                if mirror.get("recurrence"):
+                    _delete_mirror(service, config, mirror)
+                    _create_mirror(service, config, source_calendar_id, source)
+                    stats.deleted += 1
+                    stats.created += 1
+                    logger.info(
+                        "Replaced recurring mirror with instance for: %s",
+                        source.get("summary", source_id),
+                    )
+                else:
+                    _update_mirror(service, config, source_calendar_id, source, mirror)
+                    stats.updated += 1
+                    logger.info(
+                        "Updated mirror for: %s", source.get("summary", source_id)
+                    )
+            else:
+                stats.skipped += 1
+        except HttpError as exc:
+            stats.errors += 1
+            logger.error(
+                "Failed to sync event %s (%s): %s",
+                source_id,
+                source.get("summary"),
+                exc,
+            )
 
     return result
 

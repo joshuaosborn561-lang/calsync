@@ -61,11 +61,21 @@ The `[Work]` blocks will show as busy so Calendly stops double-booking you.
 
 ---
 
+## Moved or cancelled meetings
+
+When you move an Insight/work meeting, the old `[Work]` copy should disappear and a new one appear at the new time (within ~5 minutes).
+
+For an immediate fix after a move:
+1. Dropdown → **`syncNow`** → Run
+2. Or **`cleanupStaleMirrors`** to force-delete leftovers
+
 ## Troubleshooting
 
 **"Cannot find source calendar"** — Run `listMyCalendars` and match the name **exactly** (capital letters matter).
 
 **No events created** — Your work calendar might have no events in the next year, or the name is wrong.
+
+**Old time still shows after a move** — Paste the latest `CalendarMirror.gs`, Save, run **`cleanupStaleMirrors`**, then **`createSchedule`**.
 
 **Calendly still books over me** — Make sure Calendly is checking the calendar where `[Work]` events appear.
 
