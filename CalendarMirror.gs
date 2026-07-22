@@ -332,19 +332,26 @@ function deleteSafe_(destId, mirror) {
   try {
     Calendar.Events.remove(destId, id, { sendUpdates: "none" });
   } catch (e) {
-    var msg = String(e.message || e);
-    if (msg.indexOf("Not Found") !== -1 || msg.indexOf("404") !== -1) return;
+    if (alreadyGone_(e)) return;
     if (id !== mirror.id) {
       try {
         Calendar.Events.remove(destId, mirror.id, { sendUpdates: "none" });
         return;
       } catch (e2) {
-        if (String(e2).indexOf("Not Found") !== -1 || String(e2).indexOf("404") !== -1) return;
+        if (alreadyGone_(e2)) return;
         throw e2;
       }
     }
     throw e;
   }
+}
+
+function alreadyGone_(e) {
+  var msg = String(e.message || e);
+  return msg.indexOf("Not Found") !== -1 ||
+    msg.indexOf("404") !== -1 ||
+    msg.indexOf("has been deleted") !== -1 ||
+    msg.indexOf("Resource has been deleted") !== -1;
 }
 
 function body_(source, title, sourceId, sourceCalId, hash) {
