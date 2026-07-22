@@ -15,46 +15,35 @@ Click **New project**.
 ## Step 2 — Paste the code
 
 1. Delete whatever is in the editor
-2. Open the file `CalendarMirror.gs` from this repo (or copy from GitHub)
-3. Paste it all in
-4. At the top, change this line to your work calendar’s **exact name** (sidebar in Google Calendar):
+2. Open `CalendarMirror.gs` and paste it all in
+3. Confirm these lines near the top match your setup:
 
    ```
-   var SOURCE_CALENDAR_NAME = "Work";
+   var SOURCE_CALENDAR_NAME = "Insight";
+   var MIRROR_PREFIX = "[Insight] ";
+   var ONLY_ACCEPTED = true;
    ```
 
-   If your work calendar is called something else, use that name exactly.
-
-5. Leave destination as `primary` unless you made a separate calendar for mirrors
-6. Click **Save** (disk icon), name the project `Calendar Mirror`
+4. Click **Save**, name the project `Calendar Mirror`
 
 ---
 
 ## Step 3 — See your calendar names (if unsure)
 
-1. In the toolbar dropdown (says "Select function"), choose **`listMyCalendars`**
-2. Click **Run** ▶
-3. Google asks you to **Allow** access — click through and Allow
-4. Click **Execution log** at the bottom — you’ll see your calendar names and IDs
-5. Copy the exact name of your subscribed work calendar into `SOURCE_CALENDAR_NAME`
+1. Dropdown → **`listMyCalendars`** → **Run** ▶
+2. Allow access when Google asks
+3. Confirm **Insight** shows as ← SOURCE
 
 ---
 
-## Step 4 — Run once and walk away
+## Step 4 — Clean old leftovers, then sync
 
-1. Select **`syncAll`** in the dropdown
-2. Click **Run** ▶
-3. That's it — close the tab if you want
+1. Run **`cleanupStaleMirrors`** (removes old `[Insight]` / `[Work]` copies, including moved times)
+2. Refresh Google Calendar — stale ones should disappear
+3. If the log still says `Pending > 0` or `Deleted > 0`, run **`cleanupStaleMirrors`** again
+4. Run **`syncAll`** once, then **`createSchedule`**
 
-The script will:
-- Copy events in batches with pauses
-- Wait and retry if Google rate-limits you
-- **Automatically reschedule itself** every 2 minutes until everything is copied
-- Turn on ongoing 15-minute sync when finished
-
-To check progress later: run **`checkProgress`** and look at the log.
-
-## Step 5 — Calendly
+Tentative / not-yet-accepted meetings are **not** mirrored until you accept them.
 
 In Calendly, connect your **main Google Calendar** (the same one you used as destination).  
 The `[Work]` blocks will show as busy so Calendly stops double-booking you.
