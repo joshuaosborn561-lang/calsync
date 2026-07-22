@@ -218,13 +218,10 @@ function runPass_(cleanupOnly) {
     pageToken = resp.nextPageToken;
   } while (pageToken);
 
-  // Pass 2: create missing mirrors (skip during pure cleanup if out of write budget)
-  if (!cleanupOnly || wrote < MAX_WRITES) {
+  // Pass 2: create missing mirrors
+  if (wrote < MAX_WRITES && Date.now() < deadline - 15000) {
     for (var sid2 in source.byId) {
-      if (wrote >= MAX_WRITES || Date.now() > deadline - 15000) {
-        if (!seenSourceIds[sid2]) pendingCreate++;
-        continue;
-      }
+      if (wrote >= MAX_WRITES || Date.now() > deadline - 15000) break;
       if (seenSourceIds[sid2]) continue;
 
       var src2 = source.byId[sid2];
@@ -237,24 +234,19 @@ function runPass_(cleanupOnly) {
         seenSourceIds[sid2] = true;
         sleep_();
       } catch (e3) {
-        if (isRate_(e3)) return done_(created, updated, deleted, skipped, wrote, true, pendingCreate + 1);
+        if (isRate_(e3)) return done_(created, updated, deleted, skipped, wrote, true, 1);
         throw e3;
       }
     }
-  } else {
-    for (var sid3 in source.byId) {
-      if (!seenSourceIds[sid3]) pendingCreate++;
-    }
   }
 
-  // Count remaining missing
+  var pendingCreate = 0;
   for (var sid4 in source.byId) {
     if (!seenSourceIds[sid4]) pendingCreate++;
   }
 
-  var pending = pendingCreate;
-  var finished = pending === 0 && wrote < MAX_WRITES;
-  return done_(created, updated, deleted, skipped, wrote, false, pending, finished);
+  var finished = pendingCreate === 0 && wrote < MAX_WRITES;
+  return done_(created, updated, deleted, skipped, wrote, false, pendingCreate, finished);
 }
 
 function loadSourceIndex_(calendarId, timeMin, timeMax) {
