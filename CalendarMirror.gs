@@ -1,378 +1,269 @@
 /**
- * Calendar Mirror — https://script.google.com
+ * Calendar Mirror — memory-safe version
  *
  * SETUP:
- * 1. Paste code, set the EDIT THIS section below, Save
- * 2. Left sidebar → "+" → Services → Google Calendar API → Add
+ * 1. Paste, confirm EDIT THIS section, Save
+ * 2. Services → + → Google Calendar API → Add
  * 3. Run listMyCalendars → Allow
- * 4. Run cleanupStaleMirrors once (removes old leftovers)
- * 5. Run syncAll once, then createSchedule
+ * 4. Run cleanupStaleMirrors (may need a few runs)
+ * 5. Run syncAll, then createSchedule
  */
 
 // ─── EDIT THIS ───────────────────────────────────────────────────────────────
 var SOURCE_CALENDAR_NAME = "Insight";
 var DESTINATION_CALENDAR_NAME = "primary";
-
-// Title prefix on mirrored events
 var MIRROR_PREFIX = "[Insight] ";
-
-// Also clean up older prefixes from previous runs
 var LEGACY_PREFIXES = ["[Work] ", "[Insight] "];
-
-// Only mirror meetings you've accepted (skips tentative / not-responded)
 var ONLY_ACCEPTED = true;
 // ──────────────────────────────────────────────────────────────────────────────
 
-var SYNC_PAST_DAYS = 30;
-var SYNC_FUTURE_DAYS = 365;
-var CLEANUP_PAST_DAYS = 90;
+// Keep windows small to avoid Apps Script OOM
+var SYNC_PAST_DAYS = 14;
+var SYNC_FUTURE_DAYS = 120;
+var CLEANUP_FUTURE_DAYS = 60;
 
-var PAUSE_MS = 600;
-var RATE_LIMIT_WAIT_MS = 60000;
+var PAUSE_MS = 400;
 var MAX_EXEC_MS = 4 * 60 * 1000;
 var CONTINUE_DELAY_MS = 2 * 60 * 1000;
 var MAINTENANCE_INTERVAL_MINUTES = 5;
-var MAX_WRITES_PER_PASS = 50;
+var MAX_WRITES = 30;
+var PAGE_SIZE = 100;
 
 var MIRROR_SOURCE_KEY = "mirrorSourceId";
 var MIRROR_SOURCE_CAL_KEY = "mirrorSourceCalendarId";
 var MIRROR_HASH_KEY = "mirrorContentHash";
 
+// ─── entry points ────────────────────────────────────────────────────────────
+
+function listMyCalendars() {
+  checkApi_();
+  var items = Calendar.CalendarList.list({ maxResults: 100 }).items || [];
+  Logger.log("=== CALENDARS ===");
+  for (var i = 0; i < items.length; i++) {
+    var c = items[i];
+    var hint = "";
+    if (c.summary === SOURCE_CALENDAR_NAME) hint = " ← SOURCE";
+    if ((DESTINATION_CALENDAR_NAME === "primary" && c.primary) ||
+        c.summary === DESTINATION_CALENDAR_NAME) hint = " ← DESTINATION";
+    Logger.log(c.summary + hint);
+    Logger.log("  " + c.id);
+  }
+}
+
+function syncNow() {
+  checkApi_();
+  Logger.log(format_(runPass_(false)));
+}
+
+function cleanupStaleMirrors() {
+  checkApi_();
+  var result = runPass_(true);
+  Logger.log(format_(result));
+  Logger.log("Re-run cleanupStaleMirrors until Deleted: 0 and Pending: 0.");
+}
+
 function syncAll() {
-  checkCalendarApi_();
-  var startTime = Date.now();
-  var deadline = startTime + MAX_EXEC_MS;
-  var totals = loadTotals_();
-  var finished = false;
+  checkApi_();
+  var deadline = Date.now() + MAX_EXEC_MS;
+  var totals = { created: 0, updated: 0, deleted: 0, skipped: 0 };
+  var done = false;
 
   try {
-    while (Date.now() < deadline) {
-      var pass = runSyncPass_(deadline, false);
-
+    while (Date.now() < deadline - 20000) {
+      var pass = runPass_(false);
       totals.created += pass.created;
       totals.updated += pass.updated;
       totals.deleted += pass.deleted;
       totals.skipped += pass.skipped;
-      saveProgress_(totals, pass.done);
-
       if (pass.done) {
-        finished = true;
-        clearContinueTriggers_();
-        enableMaintenanceSchedule_();
-        Logger.log(
-          "ALL DONE! Created: " + totals.created +
-          ", Updated: " + totals.updated +
-          ", Deleted: " + totals.deleted +
-          ", Skipped: " + totals.skipped +
-          "\nAuto-sync ON (every " + MAINTENANCE_INTERVAL_MINUTES + " min)."
-        );
+        done = true;
+        clearContinue_();
+        enableSchedule_();
+        Logger.log("ALL DONE. " + format_(totals) +
+          "\nAuto-sync every " + MAINTENANCE_INTERVAL_MINUTES + " min.");
         return;
-      }
-
-      if (pass.rateLimited) {
-        if (Date.now() + RATE_LIMIT_WAIT_MS < deadline) {
-          Logger.log("Rate limit — waiting 60 seconds...");
-          Utilities.sleep(RATE_LIMIT_WAIT_MS);
-          continue;
-        }
-        break;
       }
       if (pass.wrote === 0) break;
     }
   } finally {
-    if (!finished) {
+    if (!done) {
       scheduleContinue_();
-      saveProgress_(totals, false);
-      Logger.log(
-        "Paused. Created so far: " + totals.created +
-        ". Auto-continues in ~2 min."
-      );
+      Logger.log("Paused — continues in ~2 min. " + format_(totals));
     }
   }
 }
 
-function syncAllContinue() {
-  syncAll();
-}
-
-function syncNow() {
-  checkCalendarApi_();
-  var pass = runSyncPass_(Date.now() + MAX_EXEC_MS, false);
-  Logger.log(formatPass_(pass));
-}
-
-/**
- * Aggressive cleanup for leftover [Insight] / [Work] copies.
- * Run this when you still see stale mirrors.
- */
-function cleanupStaleMirrors() {
-  checkCalendarApi_();
-  var pass = runSyncPass_(Date.now() + MAX_EXEC_MS, true);
-  Logger.log(
-    "Cleanup pass: " + formatPass_(pass) +
-    "\nIf Deleted > 0, check Google Calendar (refresh the page)." +
-    "\nRun cleanupStaleMirrors again until Deleted: 0."
-  );
-}
+function syncAllContinue() { syncAll(); }
 
 function createSchedule() {
-  enableMaintenanceSchedule_();
-  Logger.log("Auto-sync ON — every " + MAINTENANCE_INTERVAL_MINUTES + " minutes.");
+  enableSchedule_();
+  Logger.log("Auto-sync ON every " + MAINTENANCE_INTERVAL_MINUTES + " min.");
 }
 
 function finishSetup() {
-  checkCalendarApi_();
-  var pass = runSyncPass_(Date.now() + MAX_EXEC_MS, true);
-  if (pass.done) {
-    clearContinueTriggers_();
-    enableMaintenanceSchedule_();
-    Logger.log("Setup complete! Auto-sync every " + MAINTENANCE_INTERVAL_MINUTES + " min.");
-  } else {
-    Logger.log(pass.pending + " still pending. Run syncAll or cleanupStaleMirrors again.");
-    scheduleContinue_();
-  }
-}
-
-function listMyCalendars() {
-  checkCalendarApi_();
-  var items = (Calendar.CalendarList.list().items) || [];
-  Logger.log("=== YOUR CALENDARS ===");
-  for (var i = 0; i < items.length; i++) {
-    var cal = items[i];
-    var hint = "";
-    if (cal.summary === SOURCE_CALENDAR_NAME) hint = "  ← SOURCE";
-    if (DESTINATION_CALENDAR_NAME === "primary" && cal.primary) hint = "  ← DESTINATION";
-    if (cal.summary === DESTINATION_CALENDAR_NAME) hint = "  ← DESTINATION";
-    Logger.log(cal.summary + hint);
-    Logger.log("  ID: " + cal.id + "  access: " + cal.accessRole);
-  }
-}
-
-function checkProgress() {
-  var raw = PropertiesService.getScriptProperties().getProperty("syncProgress");
-  Logger.log(raw || "No progress saved yet.");
+  cleanupStaleMirrors();
+  createSchedule();
 }
 
 function setup() {
   listMyCalendars();
-  Logger.log("1) Run cleanupStaleMirrors  2) Run syncAll  3) Run createSchedule");
+  Logger.log("Next: cleanupStaleMirrors → syncAll → createSchedule");
 }
 
-// ─── core ────────────────────────────────────────────────────────────────────
+// ─── core (streams pages; never holds the full year in memory) ───────────────
 
-function runSyncPass_(deadlineMs, aggressiveCleanup) {
-  var deadline = deadlineMs || (Date.now() + 3600000);
-  var sourceCalId = findCalendarId_(SOURCE_CALENDAR_NAME);
-  var destCalId = findCalendarId_(DESTINATION_CALENDAR_NAME);
-
-  if (!sourceCalId) {
-    throw new Error('Cannot find source calendar "' + SOURCE_CALENDAR_NAME + '". Run listMyCalendars.');
-  }
-  if (!destCalId) {
-    throw new Error('Cannot find destination "' + DESTINATION_CALENDAR_NAME + '".');
-  }
+function runPass_(cleanupOnly) {
+  var sourceId = findCal_(SOURCE_CALENDAR_NAME);
+  var destId = findCal_(DESTINATION_CALENDAR_NAME);
+  if (!sourceId) throw new Error('Source "' + SOURCE_CALENDAR_NAME + '" not found. Run listMyCalendars.');
+  if (!destId) throw new Error('Destination "' + DESTINATION_CALENDAR_NAME + '" not found.');
 
   var now = new Date();
-  var pastDays = aggressiveCleanup ? CLEANUP_PAST_DAYS : SYNC_PAST_DAYS;
-  var timeMin = new Date(now.getTime() - pastDays * 86400000).toISOString();
-  var timeMax = new Date(now.getTime() + SYNC_FUTURE_DAYS * 86400000).toISOString();
+  var futureDays = cleanupOnly ? CLEANUP_FUTURE_DAYS : SYNC_FUTURE_DAYS;
+  var timeMin = iso_(addDays_(now, -SYNC_PAST_DAYS));
+  var timeMax = iso_(addDays_(now, futureDays));
 
-  var sourceEvents = listExpandedEvents_(sourceCalId, timeMin, timeMax);
-  var sourceById = {};
-  var sourceFingerprints = {};
-
-  for (var s = 0; s < sourceEvents.length; s++) {
-    var ev = sourceEvents[s];
-    if (!shouldMirror_(ev)) continue;
-    sourceById[ev.id] = ev;
-    sourceFingerprints[fingerprint_(ev)] = true;
-  }
-
-  var mirrors = listMirrorCandidates_(destCalId, sourceCalId, timeMin, timeMax, aggressiveCleanup);
-  var mirrorsBySourceId = {};
-  var untagged = [];
-
-  for (var m = 0; m < mirrors.length; m++) {
-    var mirror = mirrors[m];
-    var props = privateProps_(mirror);
-    var sid = props[MIRROR_SOURCE_KEY];
-    if (sid) {
-      // Prefer master events over expanded instances when both appear
-      if (!mirrorsBySourceId[sid] || !mirror.recurringEventId) {
-        mirrorsBySourceId[sid] = mirror;
-      }
-    } else {
-      untagged.push(mirror);
-    }
-  }
+  // Build a compact set of accepted source instance IDs + fingerprints
+  var source = loadSourceIndex_(sourceId, timeMin, timeMax);
 
   var created = 0, updated = 0, deleted = 0, skipped = 0, wrote = 0;
-  var rateLimited = false;
+  var pendingCreate = 0;
+  var deadline = Date.now() + MAX_EXEC_MS;
+  var seenSourceIds = {};
 
-  // 1) Delete untagged leftovers ([Insight]/ies without metadata)
-  for (var u = 0; u < untagged.length; u++) {
-    if (hitLimit_(wrote, deadline)) break;
-    var orphan = untagged[u];
-    // Keep only if fingerprint still matches a live accepted source event
-    if (sourceFingerprints[fingerprint_(orphan)]) {
-      skipped++;
-      continue;
-    }
-    if (!deleteMirrorSafe_(destCalId, orphan)) continue;
-    deleted++;
-    wrote++;
-    softPause_(deadline);
-  }
+  // Pass 1: walk destination mirrors page-by-page and delete stale ones
+  var pageToken = null;
+  do {
+    if (wrote >= MAX_WRITES || Date.now() > deadline - 15000) break;
 
-  // 2) Delete stale tagged mirrors first (moved / cancelled / unaccepted)
-  var staleIds = [];
-  for (var mid in mirrorsBySourceId) {
-    if (!sourceById[mid]) staleIds.push(mid);
-  }
+    var resp = Calendar.Events.list(destId, {
+      timeMin: timeMin,
+      timeMax: timeMax,
+      singleEvents: true,
+      orderBy: "startTime",
+      showDeleted: false,
+      maxResults: PAGE_SIZE,
+      pageToken: pageToken
+    });
 
-  for (var d = 0; d < staleIds.length; d++) {
-    if (hitLimit_(wrote, deadline) || rateLimited) break;
-    try {
-      if (!deleteMirrorSafe_(destCalId, mirrorsBySourceId[staleIds[d]])) continue;
-      deleted++;
-      wrote++;
-      delete mirrorsBySourceId[staleIds[d]];
-      softPause_(deadline);
-    } catch (e) {
-      if (isRateLimit_(e)) {
-        rateLimited = true;
-        break;
+    var items = resp.items || [];
+    for (var i = 0; i < items.length; i++) {
+      if (wrote >= MAX_WRITES || Date.now() > deadline - 15000) break;
+
+      var mirror = items[i];
+      if (!isMirrorEvent_(mirror)) continue;
+
+      var props = priv_(mirror);
+      var sid = props[MIRROR_SOURCE_KEY] || "";
+
+      // Stale if: tagged source id gone, OR untagged and fingerprint gone,
+      // OR tagged but event is no longer accepted (tentative etc.)
+      var stale = false;
+      if (sid) {
+        if (!source.byId[sid]) stale = true;
+        else seenSourceIds[sid] = true;
+      } else {
+        if (!source.fingerprints[fp_(mirror)]) stale = true;
       }
-      throw e;
-    }
-  }
 
-  // 3) Create / update current accepted source events
-  if (!rateLimited && !aggressiveCleanup) {
-    for (var sourceId in sourceById) {
-      if (hitLimit_(wrote, deadline)) break;
-      var source = sourceById[sourceId];
-      var title = MIRROR_PREFIX + (source.summary || "(No title)");
-      var hash = contentHash_(source, title);
-      var existing = mirrorsBySourceId[sourceId];
+      // Also replace wrong prefix / recurring masters left behind
+      if (!stale && mirror.recurringEventId && source.byId[sid]) {
+        // expanded instance of an old series — delete whole series once
+        stale = true;
+      }
+      if (!stale && mirror.recurrence && mirror.recurrence.length) {
+        stale = true; // old series master style — remove; instances will be recreated
+      }
 
-      try {
-        if (!existing) {
-          createMirror_(destCalId, source, title, sourceId, sourceCalId, hash);
-          created++;
-          wrote++;
-          softPause_(deadline);
-        } else if (needsUpdate_(source, existing, title, hash)) {
-          if (existing.recurrence && existing.recurrence.length) {
-            deleteMirrorSafe_(destCalId, existing);
-            createMirror_(destCalId, source, title, sourceId, sourceCalId, hash);
-            deleted++;
-            created++;
-            wrote += 2;
+      if (!stale) {
+        // live tagged mirror — maybe needs update
+        if (sid && source.byId[sid] && !cleanupOnly) {
+          var src = source.byId[sid];
+          var title = MIRROR_PREFIX + (src.summary || "(No title)");
+          var hash = hash_(src, title);
+          if (needsUpdate_(src, mirror, title, hash)) {
+            try {
+              Calendar.Events.update(
+                body_(src, title, sid, sourceId, hash),
+                destId,
+                mirror.id,
+                { sendUpdates: "none" }
+              );
+              updated++;
+              wrote++;
+              sleep_();
+            } catch (e) {
+              if (isRate_(e)) return done_(created, updated, deleted, skipped, wrote, true, 1);
+              throw e;
+            }
           } else {
-            updateMirror_(destCalId, existing.id, source, title, sourceId, sourceCalId, hash);
-            updated++;
-            wrote++;
+            skipped++;
           }
-          softPause_(deadline);
         } else {
           skipped++;
         }
-      } catch (e) {
-        if (isRateLimit_(e)) {
-          rateLimited = true;
-          break;
-        }
-        throw e;
-      }
-    }
-  } else if (aggressiveCleanup) {
-    // Still create missing ones during cleanup so calendar stays complete
-    for (var sourceId2 in sourceById) {
-      if (hitLimit_(wrote, deadline) || rateLimited) break;
-      if (mirrorsBySourceId[sourceId2]) {
-        skipped++;
         continue;
       }
-      var source2 = sourceById[sourceId2];
-      var title2 = MIRROR_PREFIX + (source2.summary || "(No title)");
-      var hash2 = contentHash_(source2, title2);
+
       try {
-        createMirror_(destCalId, source2, title2, sourceId2, sourceCalId, hash2);
-        created++;
+        deleteSafe_(destId, mirror);
+        deleted++;
         wrote++;
-        softPause_(deadline);
+        sleep_();
       } catch (e2) {
-        if (isRateLimit_(e2)) {
-          rateLimited = true;
-          break;
-        }
+        if (isRate_(e2)) return done_(created, updated, deleted, skipped, wrote, true, 1);
         throw e2;
       }
     }
-  }
+    pageToken = resp.nextPageToken;
+  } while (pageToken);
 
-  var pending = 0;
-  for (var sid2 in sourceById) {
-    var ex = mirrorsBySourceId[sid2];
-    var t = MIRROR_PREFIX + (sourceById[sid2].summary || "(No title)");
-    var h = contentHash_(sourceById[sid2], t);
-    if (!ex || needsUpdate_(sourceById[sid2], ex, t, h)) pending++;
-  }
-  for (var sid3 in mirrorsBySourceId) {
-    if (!sourceById[sid3]) pending++;
-  }
-  pending += untagged.length; // approximate; many may already be deleted
+  // Pass 2: create missing mirrors (skip during pure cleanup if out of write budget)
+  if (!cleanupOnly || wrote < MAX_WRITES) {
+    for (var sid2 in source.byId) {
+      if (wrote >= MAX_WRITES || Date.now() > deadline - 15000) {
+        if (!seenSourceIds[sid2]) pendingCreate++;
+        continue;
+      }
+      if (seenSourceIds[sid2]) continue;
 
-  var done = pending === 0 && !rateLimited && !hitLimit_(wrote, deadline);
-
-  return {
-    created: created,
-    updated: updated,
-    deleted: deleted,
-    skipped: skipped,
-    wrote: wrote,
-    rateLimited: rateLimited,
-    done: done,
-    pending: pending
-  };
-}
-
-function shouldMirror_(ev) {
-  if (!ev || ev.status === "cancelled") return false;
-  if (!ev.start || !(ev.start.dateTime || ev.start.date)) return false;
-
-  if (ONLY_ACCEPTED) {
-    if (ev.status === "tentative") return false;
-
-    var selfAttendee = findSelfAttendee_(ev);
-    if (selfAttendee) {
-      var resp = selfAttendee.responseStatus || "";
-      // Only mirror once you've accepted
-      if (resp !== "accepted") return false;
-    } else if (ev.organizer && ev.organizer.self) {
-      // You organized it — keep it
-    } else {
-      // Subscribed feed with no self attendee: still mirror confirmed blocks
-      // (common for Insight subscribed calendars)
+      var src2 = source.byId[sid2];
+      var title2 = MIRROR_PREFIX + (src2.summary || "(No title)");
+      var hash2 = hash_(src2, title2);
+      try {
+        Calendar.Events.insert(body_(src2, title2, sid2, sourceId, hash2), destId, { sendUpdates: "none" });
+        created++;
+        wrote++;
+        seenSourceIds[sid2] = true;
+        sleep_();
+      } catch (e3) {
+        if (isRate_(e3)) return done_(created, updated, deleted, skipped, wrote, true, pendingCreate + 1);
+        throw e3;
+      }
+    }
+  } else {
+    for (var sid3 in source.byId) {
+      if (!seenSourceIds[sid3]) pendingCreate++;
     }
   }
-  return true;
-}
 
-function findSelfAttendee_(ev) {
-  var attendees = ev.attendees || [];
-  for (var i = 0; i < attendees.length; i++) {
-    if (attendees[i].self) return attendees[i];
+  // Count remaining missing
+  for (var sid4 in source.byId) {
+    if (!seenSourceIds[sid4]) pendingCreate++;
   }
-  return null;
+
+  var pending = pendingCreate;
+  var finished = pending === 0 && wrote < MAX_WRITES;
+  return done_(created, updated, deleted, skipped, wrote, false, pending, finished);
 }
 
-// ─── listing / cleanup discovery ─────────────────────────────────────────────
+function loadSourceIndex_(calendarId, timeMin, timeMax) {
+  var byId = {};
+  var fingerprints = {};
+  var pageToken = null;
+  var count = 0;
+  var MAX_SOURCE = 800; // hard cap to protect memory
 
-function listExpandedEvents_(calendarId, timeMin, timeMax) {
-  var events = [];
-  var pageToken;
   do {
     var resp = Calendar.Events.list(calendarId, {
       timeMin: timeMin,
@@ -380,270 +271,185 @@ function listExpandedEvents_(calendarId, timeMin, timeMax) {
       singleEvents: true,
       orderBy: "startTime",
       showDeleted: false,
-      maxResults: 2500,
+      maxResults: PAGE_SIZE,
       pageToken: pageToken
     });
-    if (resp.items) events = events.concat(resp.items);
-    pageToken = resp.nextPageToken;
-  } while (pageToken);
-  return events;
-}
-
-/**
- * Find every mirrored event — tagged, legacy [Work]/ [Insight], and
- * recurring masters (not just expanded instances).
- */
-function listMirrorCandidates_(destCalId, sourceCalId, timeMin, timeMax, aggressive) {
-  var byId = {};
-
-  // A) Tagged by current source calendar id
-  addListed_(byId, destCalId, {
-    timeMin: timeMin,
-    timeMax: timeMax,
-    singleEvents: false,
-    showDeleted: false,
-    maxResults: 2500,
-    privateExtendedProperty: MIRROR_SOURCE_CAL_KEY + "=" + sourceCalId
-  });
-
-  // B) Any event whose title starts with a known mirror prefix
-  //    (catches old runs, wrong tags, CalendarApp leftovers)
-  var all = listExpandedEvents_(destCalId, timeMin, timeMax);
-  for (var i = 0; i < all.length; i++) {
-    var ev = all[i];
-    if (hasMirrorPrefix_(ev.summary || "")) {
-      byId[ev.id] = ev;
-    }
-  }
-
-  // C) Also pull non-expanded masters with those titles
-  addListed_(byId, destCalId, {
-    timeMin: timeMin,
-    timeMax: timeMax,
-    singleEvents: false,
-    showDeleted: false,
-    maxResults: 2500
-  }, true);
-
-  if (aggressive) {
-    // Wider sweep already uses CLEANUP_PAST_DAYS via caller
-  }
-
-  var out = [];
-  for (var id in byId) out.push(byId[id]);
-  return out;
-}
-
-function addListed_(byId, calendarId, params, prefixFilterOnly) {
-  var pageToken;
-  do {
-    var opts = {};
-    for (var k in params) opts[k] = params[k];
-    opts.pageToken = pageToken;
-    var resp = Calendar.Events.list(calendarId, opts);
     var items = resp.items || [];
     for (var i = 0; i < items.length; i++) {
+      if (count >= MAX_SOURCE) break;
       var ev = items[i];
-      if (prefixFilterOnly && !hasMirrorPrefix_(ev.summary || "")) continue;
-      byId[ev.id] = ev;
+      if (!shouldMirror_(ev)) continue;
+      // Store a slim copy only — drop heavy fields
+      var slim = {
+        id: ev.id,
+        summary: ev.summary,
+        start: ev.start,
+        end: ev.end,
+        status: ev.status,
+        location: ev.location,
+        updated: ev.updated
+      };
+      byId[ev.id] = slim;
+      fingerprints[fp_(slim)] = true;
+      count++;
     }
+    if (count >= MAX_SOURCE) break;
     pageToken = resp.nextPageToken;
   } while (pageToken);
+
+  return { byId: byId, fingerprints: fingerprints, count: count };
 }
 
-function hasMirrorPrefix_(summary) {
-  var prefixes = uniquePrefixes_();
+function shouldMirror_(ev) {
+  if (!ev || ev.status === "cancelled") return false;
+  if (!ev.start || !(ev.start.dateTime || ev.start.date)) return false;
+  if (!ONLY_ACCEPTED) return true;
+  if (ev.status === "tentative") return false;
+
+  var attendees = ev.attendees || [];
+  for (var i = 0; i < attendees.length; i++) {
+    if (attendees[i].self) {
+      return attendees[i].responseStatus === "accepted";
+    }
+  }
+  // No self attendee (common on subscribed calendars) — keep confirmed events
+  return true;
+}
+
+function isMirrorEvent_(ev) {
+  var summary = ev.summary || "";
+  var prefixes = prefixes_();
   for (var i = 0; i < prefixes.length; i++) {
     if (summary.indexOf(prefixes[i]) === 0) return true;
   }
-  return false;
+  var props = priv_(ev);
+  return !!(props[MIRROR_SOURCE_KEY] || props[MIRROR_SOURCE_CAL_KEY]);
 }
-
-function uniquePrefixes_() {
-  var out = [];
-  var seen = {};
-  var all = [MIRROR_PREFIX].concat(LEGACY_PREFIXES || []);
-  for (var i = 0; i < all.length; i++) {
-    var p = all[i];
-    if (p && !seen[p]) {
-      seen[p] = true;
-      out.push(p);
-    }
-  }
-  return out;
-}
-
-/**
- * Delete a mirror. If it's an expanded instance of a recurring series,
- * delete the whole series master so every leftover slot disappears.
- */
-function deleteMirrorSafe_(destCalId, mirror) {
-  if (!mirror || !mirror.id) return false;
-  try {
-    var idToDelete = mirror.id;
-    if (mirror.recurringEventId) {
-      idToDelete = mirror.recurringEventId;
-    }
-    Calendar.Events.remove(destCalId, idToDelete, { sendUpdates: "none" });
-    return true;
-  } catch (e) {
-    var msg = String(e.message || e);
-    if (msg.indexOf("Not Found") !== -1 || msg.indexOf("404") !== -1) return true;
-    if (isRateLimit_(e)) throw e;
-    // Fallback: try the instance id itself
-    try {
-      Calendar.Events.remove(destCalId, mirror.id, { sendUpdates: "none" });
-      return true;
-    } catch (e2) {
-      if (String(e2).indexOf("Not Found") !== -1 || String(e2).indexOf("404") !== -1) return true;
-      throw e2;
-    }
-  }
-}
-
-// ─── create / update ─────────────────────────────────────────────────────────
 
 function needsUpdate_(source, mirror, title, hash) {
-  var props = privateProps_(mirror);
+  var props = priv_(mirror);
   if (props[MIRROR_HASH_KEY] !== hash) return true;
   if (mirror.summary !== title) return true;
-  if (!dateTimeEqual_(mirror.start, source.start)) return true;
-  if (!dateTimeEqual_(mirror.end, source.end)) return true;
-  if (mirror.recurrence && mirror.recurrence.length) return true;
+  if (startKey_(mirror) !== startKey_(source)) return true;
+  if (endKey_(mirror) !== endKey_(source)) return true;
   return false;
 }
 
-function contentHash_(source, title) {
-  return [
-    title,
-    eventStartKey_(source),
-    eventEndKey_(source),
-    source.status || "",
-    source.location || ""
-  ].join("|");
-}
-
-function fingerprint_(ev) {
-  return [
-    stripPrefix_(ev.summary || ""),
-    eventStartKey_(ev),
-    eventEndKey_(ev)
-  ].join("|");
-}
-
-function stripPrefix_(summary) {
-  var prefixes = uniquePrefixes_();
-  for (var i = 0; i < prefixes.length; i++) {
-    if (summary.indexOf(prefixes[i]) === 0) {
-      return summary.substring(prefixes[i].length);
+function deleteSafe_(destId, mirror) {
+  var id = mirror.recurringEventId || mirror.id;
+  try {
+    Calendar.Events.remove(destId, id, { sendUpdates: "none" });
+  } catch (e) {
+    var msg = String(e.message || e);
+    if (msg.indexOf("Not Found") !== -1 || msg.indexOf("404") !== -1) return;
+    if (id !== mirror.id) {
+      try {
+        Calendar.Events.remove(destId, mirror.id, { sendUpdates: "none" });
+        return;
+      } catch (e2) {
+        if (String(e2).indexOf("Not Found") !== -1 || String(e2).indexOf("404") !== -1) return;
+        throw e2;
+      }
     }
+    throw e;
   }
-  return summary;
 }
 
-function eventStartKey_(ev) {
-  var s = ev.start || {};
-  return s.dateTime || s.date || "";
-}
-
-function eventEndKey_(ev) {
-  var e = ev.end || {};
-  return e.dateTime || e.date || "";
-}
-
-function dateTimeEqual_(a, b) {
-  if (!a && !b) return true;
-  if (!a || !b) return false;
-  return (a.dateTime || a.date || "") === (b.dateTime || b.date || "");
-}
-
-function privateProps_(ev) {
-  return ((ev.extendedProperties || {}).private) || {};
-}
-
-function buildMirrorBody_(source, title, sourceId, sourceCalId, hash) {
-  var body = {
+function body_(source, title, sourceId, sourceCalId, hash) {
+  var b = {
     summary: title,
     start: source.start,
     end: source.end,
     transparency: "opaque",
-    guestsCanModify: false,
-    guestsCanInviteOthers: false,
     description: "Mirrored from Insight.\nSource: " + sourceId,
     extendedProperties: { private: {} }
   };
-  body.extendedProperties.private[MIRROR_SOURCE_KEY] = sourceId;
-  body.extendedProperties.private[MIRROR_SOURCE_CAL_KEY] = sourceCalId;
-  body.extendedProperties.private[MIRROR_HASH_KEY] = hash;
-  body.extendedProperties.private.mirrorSourceUpdated = source.updated || "";
-  if (source.location) body.location = source.location;
-  return body;
+  b.extendedProperties.private[MIRROR_SOURCE_KEY] = sourceId;
+  b.extendedProperties.private[MIRROR_SOURCE_CAL_KEY] = sourceCalId;
+  b.extendedProperties.private[MIRROR_HASH_KEY] = hash;
+  if (source.location) b.location = source.location;
+  return b;
 }
 
-function createMirror_(destCalId, source, title, sourceId, sourceCalId, hash) {
-  Calendar.Events.insert(
-    buildMirrorBody_(source, title, sourceId, sourceCalId, hash),
-    destCalId,
-    { sendUpdates: "none" }
-  );
+function hash_(source, title) {
+  return [title, startKey_(source), endKey_(source), source.location || ""].join("|");
 }
 
-function updateMirror_(destCalId, mirrorId, source, title, sourceId, sourceCalId, hash) {
-  Calendar.Events.update(
-    buildMirrorBody_(source, title, sourceId, sourceCalId, hash),
-    destCalId,
-    mirrorId,
-    { sendUpdates: "none" }
-  );
+function fp_(ev) {
+  return [strip_(ev.summary || ""), startKey_(ev), endKey_(ev)].join("|");
 }
 
-// ─── misc ────────────────────────────────────────────────────────────────────
+function strip_(summary) {
+  var p = prefixes_();
+  for (var i = 0; i < p.length; i++) {
+    if (summary.indexOf(p[i]) === 0) return summary.substring(p[i].length);
+  }
+  return summary;
+}
 
-function findCalendarId_(nameOrPrimary) {
-  var items = (Calendar.CalendarList.list().items) || [];
+function prefixes_() {
+  var out = [], seen = {};
+  var all = [MIRROR_PREFIX].concat(LEGACY_PREFIXES || []);
+  for (var i = 0; i < all.length; i++) {
+    if (all[i] && !seen[all[i]]) { seen[all[i]] = true; out.push(all[i]); }
+  }
+  return out;
+}
+
+function priv_(ev) { return ((ev.extendedProperties || {}).private) || {}; }
+function startKey_(ev) { var s = ev.start || {}; return s.dateTime || s.date || ""; }
+function endKey_(ev) { var e = ev.end || {}; return e.dateTime || e.date || ""; }
+
+function findCal_(name) {
+  var items = Calendar.CalendarList.list({ maxResults: 100 }).items || [];
   for (var i = 0; i < items.length; i++) {
-    var cal = items[i];
-    if (nameOrPrimary === "primary" && cal.primary) return cal.id;
-    if (cal.summary === nameOrPrimary) return cal.id;
+    if (name === "primary" && items[i].primary) return items[i].id;
+    if (items[i].summary === name) return items[i].id;
   }
   return null;
 }
 
-function checkCalendarApi_() {
+function checkApi_() {
   if (typeof Calendar === "undefined" || !Calendar.Events) {
-    throw new Error(
-      "Enable Google Calendar API: left sidebar → + → Services → Google Calendar API → Add"
-    );
+    throw new Error("Add Google Calendar API: left sidebar → Services → + → Google Calendar API");
   }
 }
 
-function hitLimit_(wrote, deadline) {
-  return wrote >= MAX_WRITES_PER_PASS || Date.now() > deadline - 15000;
+function addDays_(d, n) { return new Date(d.getTime() + n * 86400000); }
+function iso_(d) { return d.toISOString(); }
+function sleep_() { Utilities.sleep(PAUSE_MS); }
+function isRate_(e) {
+  var m = String(e.message || e);
+  return m.indexOf("too many") !== -1 || m.indexOf("Rate Limit") !== -1 || m.indexOf("overhead") !== -1;
 }
 
-function softPause_(deadline) {
-  if (Date.now() + PAUSE_MS < deadline) Utilities.sleep(PAUSE_MS);
+function done_(created, updated, deleted, skipped, wrote, rateLimited, pending, finished) {
+  return {
+    created: created,
+    updated: updated,
+    deleted: deleted,
+    skipped: skipped,
+    wrote: wrote,
+    rateLimited: !!rateLimited,
+    pending: pending || 0,
+    done: !!finished && !rateLimited && (pending || 0) === 0
+  };
 }
 
-function isRateLimit_(e) {
-  var msg = String(e.message || e);
-  return msg.indexOf("too many") !== -1 || msg.indexOf("Rate Limit") !== -1;
-}
-
-function formatPass_(pass) {
-  return "Created: " + pass.created +
-    ", Updated: " + pass.updated +
-    ", Deleted: " + pass.deleted +
-    ", Skipped: " + pass.skipped +
-    (pass.done ? "\nAll caught up." : "\nPending: " + pass.pending + " — run again.");
+function format_(p) {
+  return "Created: " + (p.created || 0) +
+    ", Updated: " + (p.updated || 0) +
+    ", Deleted: " + (p.deleted || 0) +
+    ", Skipped: " + (p.skipped || 0) +
+    ", Pending: " + (p.pending || 0);
 }
 
 function scheduleContinue_() {
-  clearContinueTriggers_();
+  clearContinue_();
   ScriptApp.newTrigger("syncAllContinue").timeBased().after(CONTINUE_DELAY_MS).create();
 }
 
-function clearContinueTriggers_() {
+function clearContinue_() {
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === "syncAllContinue") {
@@ -652,7 +458,7 @@ function clearContinueTriggers_() {
   }
 }
 
-function enableMaintenanceSchedule_() {
+function enableSchedule_() {
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === "syncNow") {
@@ -660,30 +466,4 @@ function enableMaintenanceSchedule_() {
     }
   }
   ScriptApp.newTrigger("syncNow").timeBased().everyMinutes(MAINTENANCE_INTERVAL_MINUTES).create();
-}
-
-function saveProgress_(totals, done) {
-  PropertiesService.getScriptProperties().setProperty(
-    "syncProgress",
-    JSON.stringify({
-      created: totals.created,
-      updated: totals.updated,
-      deleted: totals.deleted,
-      skipped: totals.skipped,
-      done: done,
-      at: new Date().toISOString()
-    })
-  );
-}
-
-function loadTotals_() {
-  var raw = PropertiesService.getScriptProperties().getProperty("syncProgress");
-  if (!raw) return { created: 0, updated: 0, deleted: 0, skipped: 0 };
-  var p = JSON.parse(raw);
-  return {
-    created: p.created || 0,
-    updated: p.updated || 0,
-    deleted: p.deleted || 0,
-    skipped: p.skipped || 0
-  };
 }
