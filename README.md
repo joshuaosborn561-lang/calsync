@@ -35,14 +35,30 @@ When you subscribe to a work calendar in Google Calendar, those events show up f
 
 This tool runs on a schedule and:
 
-1. **Discovers** subscribed calendars on your Google account (`--list-subscribed`)
+1. **Discovers** subscribed calendars on your Google account
 2. **Reads** events from the subscribed work calendar(s)
 3. **Creates native copies** on your writable destination calendar (marked **busy**)
 4. **Updates** copies when work events change
-5. **Deletes** copies when work events are removed
-6. Handles **recurring events** (including modified instances)
+5. **Deletes** copies when work events are moved, cancelled, or declined
+6. Handles **recurring events** by mirroring each occurrence separately
 
 Each mirrored event is tagged with hidden metadata so the tool knows which source event it came from — no duplicates on repeated runs.
+
+## Two ways to run it
+
+**Google Apps Script (recommended).** No servers, no credentials files. Paste
+`CalendarMirror.gs`, run `install()` once, and it self-manages after that:
+
+- Syncs every 10 minutes; re-checks the next 3 weeks on every run
+- Sweeps up to 6 months ahead a chunk at a time, so it can't time out or run out of memory
+- Catches every API error and retries on the next run instead of stopping
+- Re-creates its own trigger if it ever goes missing (watchdog)
+- Skips tentative / unaccepted invites until you accept them
+- `healthCheck()` prints a plain-English status report
+
+See [GET-STARTED.md](GET-STARTED.md).
+
+**Python + cron.** For running on your own server: `sync_calendar.py`, described below.
 
 ## Prerequisites
 
