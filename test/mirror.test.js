@@ -1,5 +1,5 @@
 /**
- * Local test harness for CalendarMirror.gs — simulates the Apps Script
+ * Local test harness for Code.gs — simulates the Apps Script
  * Calendar API so we can verify sync behaviour without a Google account.
  */
 
@@ -135,7 +135,7 @@ function buildEnv(options = {}) {
     __state: state,
   };
 
-  const code = fs.readFileSync(__dirname + "/../CalendarMirror.gs", "utf8");
+  const code = fs.readFileSync(__dirname + "/../Code.gs", "utf8");
   const context = vm.createContext(sandbox);
   vm.runInContext(code, context);
   return { sandbox, state, context };
