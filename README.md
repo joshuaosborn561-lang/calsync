@@ -52,7 +52,7 @@ source calendar. It writes busy blocks onto a separate target calendar
 (`TARGET_CALENDAR_ID`) that is shared to that account with "Make changes to events".
 
 - Syncs every 10 minutes, 7 days a week; window is 7 days back to 60 days ahead
-- Copies are `[Insight] Busy` (grey, opaque) or `[Insight] Tentative` (yellow, free);
+- Copies are `[Insight] Busy` (Grape, opaque) or `[Insight] Tentative` (Graphite, free);
   no reminders, no guests, no notifications
 - Matches copies in passes (source ID + original start, then start/end/status,
   then start/end) and dedupes so each source event has exactly one copy

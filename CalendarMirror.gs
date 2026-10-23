@@ -17,6 +17,9 @@
  *      from this account's primary calendar. Never run by the trigger.
  *
  * Stop with uninstall().
+ *
+ * Colors: Busy = 3 (Grape), Tentative = 8 (Graphite). Existing copies with a
+ * different color are patched on the next sync.
  */
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
@@ -40,8 +43,8 @@ var ALERT_REPEAT_MS = 6 * 60 * 60 * 1000;
 
 var TITLE_PREFIX = "[Insight]";
 var STYLE = {
-  busy:      { summary: "[Insight] Busy",      colorId: "8", transparency: "opaque" },
-  tentative: { summary: "[Insight] Tentative", colorId: "5", transparency: "transparent" }
+  busy:      { summary: "[Insight] Busy",      colorId: "3", transparency: "opaque" },
+  tentative: { summary: "[Insight] Tentative", colorId: "8", transparency: "transparent" }
 };
 
 var KEY_TAG = "insightMirror";          // private extendedProperty marking our copies
@@ -185,6 +188,9 @@ function syncNow() {
 /**
  * ONE-TIME, manual only. Deletes old "[Insight]" copies from THIS account's
  * primary calendar (the previous destination). Never called by the trigger.
+ *
+ * Colors: Busy = 3 (Grape), Tentative = 8 (Graphite). Existing copies with a
+ * different color are patched on the next sync.
  */
 function cleanupOldGmailCopies() {
   var min = new Date(Date.now() - 365 * 86400000).toISOString();
@@ -206,6 +212,9 @@ function cleanupOldGmailCopies() {
 /**
  * Pass 1: source ID + original start. Pass 2: start + end + status.
  * Pass 3: start + end. Each source keeps exactly one copy; the rest are deleted.
+ *
+ * Colors: Busy = 3 (Grape), Tentative = 8 (Graphite). Existing copies with a
+ * different color are patched on the next sync.
  */
 function match_(sources, copies) {
   var free = copies.slice();
