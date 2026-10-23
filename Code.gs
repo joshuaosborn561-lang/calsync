@@ -1,29 +1,31 @@
 /**
- * Calendar Mirror — Insight free/busy -> work calendar
+ * Calendar Mirror — Insight free/busy -> this account's primary calendar
+ * (paste into Code.gs of the CalSync Apps Script project)
  *
- * Runs in the personal Gmail account that subscribes to the "Insight"
- * free/busy calendar, and writes "[Insight] Busy" / "[Insight] Tentative"
- * blocks onto the work calendar (TARGET_CALENDAR_ID).
+ * Writes "[Insight] Busy" / "[Insight] Tentative" blocks onto TARGET_CALENDAR_ID
+ * ("primary" = the account running the script) from the subscribed "Insight"
+ * free/busy calendar.
+ *
+ * Existing copies from the older script (they carry mirrorSourceId, may lack
+ * the original-start property, and may have old titles) are ADOPTED: matched
+ * through the same passes, restamped, retitled and recolored in place, then
+ * deduped. Only events the mirror owns are ever touched: events with mirror
+ * properties or a title starting with "[Insight]".
  *
  * SETUP (once):
- *   1. Paste this whole file into the Apps Script project and Save.
- *   2. Left sidebar -> Services -> + -> Google Calendar API -> Add
- *      (Advanced Calendar service; identifier must stay "Calendar").
- *   3. Set TARGET_CALENDAR_ID below. The target calendar must be shared to
- *      this account with "Make changes to events".
- *   4. Run healthCheck() and confirm both calendars are reachable.
- *   5. Run install().
- *   6. Optional, once: cleanupOldGmailCopies() removes old "[Insight]" copies
- *      from this account's primary calendar. Never run by the trigger.
+ *   1. Paste this whole file into Code.gs and Save.
+ *   2. Services -> + -> Google Calendar API -> Add (identifier "Calendar").
+ *   3. Run healthCheck().
+ *   4. Run install().
+ *
+ * Colors: Busy = 3 (Grape), Tentative = 8 (Graphite). Copies with a different
+ * color or title are patched on the next sync.
  *
  * Stop with uninstall().
- *
- * Colors: Busy = 3 (Grape), Tentative = 8 (Graphite). Existing copies with a
- * different color are patched on the next sync.
  */
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-var TARGET_CALENDAR_ID = "joshua@salesglidergrowth.com";
+var TARGET_CALENDAR_ID = "primary";     // this account's own calendar
 var SOURCE_CALENDAR_NAME = "Insight";   // name or ID of the subscribed calendar
 var ALERT_EMAIL = "";                   // blank = the account running the script
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,6 +53,8 @@ var KEY_TAG = "insightMirror";          // private extendedProperty marking our 
 var KEY_SID = "insightSourceId";
 var KEY_ORIG = "insightOrigStart";
 var KEY_STATUS = "insightStatus";
+var LEGACY_SID = "mirrorSourceId";        // set by the older script
+var LEGACY_KEYS = ["mirrorSourceId", "mirrorSourceCalendarId"];
 
 var P_LAST_OK = "lastSuccessAt";
 var P_LAST_RUN = "lastRunAt";
@@ -185,25 +189,6 @@ function syncNow() {
   }
 }
 
-/**
- * ONE-TIME, manual only. Deletes old "[Insight]" copies from THIS account's
- * primary calendar (the previous destination). Never called by the trigger.
- */
-function cleanupOldGmailCopies() {
-  var min = new Date(Date.now() - 365 * 86400000).toISOString();
-  var max = new Date(Date.now() + 400 * 86400000).toISOString();
-  var res = listAll_("primary", min, max, 200);
-  if (!res.ok) { Logger.log("Could not list primary: " + res.error); return; }
-  var deleted = 0, failed = 0;
-  res.items.forEach(function (ev) {
-    if ((ev.summary || "").indexOf(TITLE_PREFIX) !== 0) return;
-    if (call_(function () { Calendar.Events.remove("primary", ev.id, { sendUpdates: "none" }); }, true)) deleted++;
-    else failed++;
-  });
-  Logger.log("Deleted " + deleted + " old copies from primary" + (failed ? ", " + failed + " failed" : "") +
-    (res.truncated ? ". List was truncated — run again." : "."));
-}
-
 // ─── matching ────────────────────────────────────────────────────────────────
 
 /**
@@ -218,7 +203,9 @@ function match_(sources, copies) {
 
   var passes = [
     { n: 1, s: function (e) { return e.id + "|" + origKey_(e); },
-            c: function (c) { var p = priv_(c); return p[KEY_SID] ? p[KEY_SID] + "|" + p[KEY_ORIG] : null; } },
+            c: function (c) { var id = copySid_(c); var o = priv_(c)[KEY_ORIG]; return id && o ? id + "|" + o : null; } },
+    { n: 1, s: function (e) { return e.id; },          // adopted copies with no original-start stamp
+            c: function (c) { var id = copySid_(c); return id && !priv_(c)[KEY_ORIG] ? id : null; } },
     { n: 2, s: function (e) { return timeKey_(e) + "|" + kind_(e); },
             c: function (c) { return timeKey_(c) + "|" + copyKind_(c); } },
     { n: 3, s: function (e) { return timeKey_(e); },
@@ -252,7 +239,11 @@ function needsUpdate_(s, c, pass) {
   if (pass !== 1) return true; // refresh stored source ID
   var want = STYLE[kind_(s)];
   var p = priv_(c);
-  return c.summary !== want.summary ||
+  return p[KEY_SID] !== s.id ||
+    p[KEY_ORIG] !== origKey_(s) ||
+    (p[LEGACY_SID] && p[LEGACY_SID] !== s.id) ||
+    !!c.description || !!c.location ||
+    c.summary !== want.summary ||
     c.colorId !== want.colorId ||
     (c.transparency || "opaque") !== want.transparency ||
     timeKey_(c) !== timeKey_(s) ||
@@ -269,12 +260,15 @@ function body_(s) {
   priv[KEY_SID] = s.id;
   priv[KEY_ORIG] = origKey_(s);
   priv[KEY_STATUS] = k;
+  priv[LEGACY_SID] = s.id;   // keep legacy key consistent on adopted copies
   return {
     summary: st.summary,
     colorId: st.colorId,
     transparency: st.transparency,
     start: s.start,
     end: s.end,
+    description: "",
+    location: "",
     reminders: { useDefault: false, overrides: [] },
     attendees: [],
     guestsCanSeeOtherGuests: false,
@@ -284,8 +278,19 @@ function body_(s) {
   };
 }
 
+/** Owned by the mirror: mirror properties or an "[Insight]" title. Nothing else. */
 function isCopy_(ev) {
-  return priv_(ev)[KEY_TAG] === "1" || (ev.summary || "").indexOf(TITLE_PREFIX) === 0;
+  var p = priv_(ev), sh = shared_(ev);
+  if (p[KEY_TAG] === "1" || p[KEY_SID]) return true;
+  for (var i = 0; i < LEGACY_KEYS.length; i++) {
+    if (p[LEGACY_KEYS[i]] || sh[LEGACY_KEYS[i]]) return true;
+  }
+  return (ev.summary || "").indexOf(TITLE_PREFIX) === 0;
+}
+
+function copySid_(c) {
+  var p = priv_(c), sh = shared_(c);
+  return p[KEY_SID] || p[LEGACY_SID] || sh[LEGACY_SID] || "";
 }
 
 function kind_(s) { return s.status === "tentative" ? "tentative" : "busy"; }
@@ -294,6 +299,7 @@ function copyKind_(c) {
   if (k) return k;
   return (c.summary || "").indexOf("Tentative") !== -1 ? "tentative" : "busy";
 }
+function shared_(ev) { return ((ev.extendedProperties || {}).shared) || {}; }
 function priv_(ev) { return ((ev.extendedProperties || {}).private) || {}; }
 function tKey_(t) {
   t = t || {};
