@@ -13,7 +13,7 @@ Go to **https://script.google.com** and open your project (or click **New projec
 ## Step 2 — Paste the code
 
 1. Select everything in the editor and delete it
-2. Paste all of `CalendarMirror.gs`
+2. Paste all of `Code.gs`
 3. Check the settings at the top:
 
 ```javascript

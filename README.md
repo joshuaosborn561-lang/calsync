@@ -47,14 +47,26 @@ Each mirrored event is tagged with hidden metadata so the tool knows which sourc
 ## Two ways to run it
 
 **Google Apps Script (recommended).** No servers, no credentials files. Paste
-`CalendarMirror.gs`, run `install()` once, and it self-manages after that:
+`Code.gs` into the Apps Script project (Code.gs) in the account that subscribes
+to the free/busy source calendar. It writes busy blocks onto that account's own
+calendar (`TARGET_CALENDAR_ID = "primary"`).
 
-- Syncs every 10 minutes; re-checks the next 3 weeks on every run
-- Sweeps up to 6 months ahead a chunk at a time, so it can't time out or run out of memory
-- Catches every API error and retries on the next run instead of stopping
-- Re-creates its own trigger if it ever goes missing (watchdog)
-- Skips tentative / unaccepted invites until you accept them
-- `healthCheck()` prints a plain-English status report
+- Syncs every 10 minutes, 7 days a week; window is 7 days back to 60 days ahead
+- Copies are `[Insight] Busy` (Grape, opaque) or `[Insight] Tentative` (Graphite, free);
+  no reminders, no guests, no notifications, no description/location
+- Matches copies in passes (source ID + original start, then source ID alone for
+  older copies, then start/end/status, then start/end) and dedupes so each source
+  event has exactly one copy
+- Adopts copies made by the older script (`mirrorSourceId`): restamps properties
+  and fixes title/color in place instead of recreating them
+- Only touches events the mirror owns (mirror properties or an `[Insight]` title)
+- Deletes unmatched copies first; creates/updates stop at ~4.5 min and resume next run
+- Never deletes when the source list is empty, errored or truncated
+- Emails an alert after 2 failed runs in a row or 1 hour without a success
+- `install()`, `uninstall()`, `healthCheck()`
+
+Steps: enable the Advanced Calendar service (Services -> Google Calendar API),
+paste into Code.gs, run `healthCheck()`, then `install()`.
 
 See [GET-STARTED.md](GET-STARTED.md).
 
