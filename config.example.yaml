@@ -1,0 +1,33 @@
+# Copy to config.yaml and edit before running.
+
+# Subscribed calendar(s) to read events FROM (read-only work calendars).
+# Run: python sync_calendar.py --list-subscribed
+# Use a single ID:
+source_calendar_id: "your-work-calendar-id@group.calendar.google.com"
+# Or mirror multiple subscribed calendars:
+# source_calendar_ids:
+#   - "work-calendar-1@group.calendar.google.com"
+#   - "work-calendar-2@group.calendar.google.com"
+
+# Writable calendar to create NATIVE duplicate events ON.
+# This must be a calendar you own (primary or a calendar you created).
+# Calendly can only see native events here — not subscribed overlays.
+# Tip: create a calendar named "Work (mirrored)" and point Calendly at it.
+destination_calendar_id: "primary"
+
+# Optional prefix added to mirrored event titles so you can tell them apart.
+event_title_prefix: "[Work] "
+
+# How far back and forward to sync (days).
+sync_past_days: 7
+sync_future_days: 365
+
+# Mark mirrored events as busy so Calendly blocks those times.
+mark_busy: true
+
+# Copy event location and description into mirrors.
+copy_location: true
+copy_description: true
+
+# Skip all-day events (set false to mirror them too).
+skip_all_day: false
